@@ -13,6 +13,7 @@ class ModelSeeder(object):
         """
         self.model = model
         self.field_formatters = {}
+        self.many_relations = {}
 
     @staticmethod
     def build_relation(field, related_model):
@@ -20,7 +21,38 @@ class ModelSeeder(object):
             if related_model in inserted and inserted[related_model]:
                 pk = random.choice(inserted[related_model])
                 return related_model.objects.get(pk=pk)
-            else:
+            elif not field.null:
+                message = 'Field {} cannot be null'.format(field)
+                raise SeederException(message)
+
+        return func
+
+    @staticmethod
+    def build_one_relation(field, related_model, existing):
+        def func(inserted):
+            if related_model in inserted and inserted[related_model]:
+                unused = list(set(inserted[related_model]) - existing)
+                if unused:
+                    pk = random.choice(unused)
+                    existing.add(pk)
+                    return related_model.objects.get(pk=pk)
+
+            if not field.null:
+                message = 'Field {} cannot be null'.format(field)
+                raise SeederException(message)
+
+        return func
+
+    @staticmethod
+    def build_many_relation(field, related_model):
+        def func(inserted):
+            if related_model in inserted and inserted[related_model]:
+                max_relations = min(10, round(len(inserted[related_model]) / 5) + 1)
+                return [
+                    related_model.objects.get(pk=random.choice(inserted[related_model]))
+                    for _ in range(random.randint(0, max_relations))
+                ]
+            elif not field.blank:
                 message = 'Field {} cannot be null'.format(field)
                 raise SeederException(message)
 
@@ -44,7 +76,12 @@ class ModelSeeder(object):
                 formatters[field_name] = field.get_default()
                 continue
             
-            if isinstance(field, (ForeignKey, ManyToManyField, OneToOneField)):
+            if isinstance(field, OneToOneField):
+                existing = set()
+                formatters[field_name] = self.build_one_relation(field, field.related_model, existing)
+                continue
+
+            if isinstance(field, ForeignKey):
                 formatters[field_name] = self.build_relation(field, field.related_model)
                 continue
 
@@ -61,6 +98,9 @@ class ModelSeeder(object):
             if formatter:
                 formatters[field_name] = formatter
                 continue
+
+        for field in self.model._meta.many_to_many:
+            self.many_relations[field.name] = self.build_many_relation(field, field.related_model)
 
         return formatters
 
@@ -100,6 +140,12 @@ class ModelSeeder(object):
 
         obj = manager.create(**faker_data)
 
+        for field, list in self.many_relations.items():
+            list = list(inserted_entities)
+            if list:
+                for related_obj in list:
+                    getattr(obj, field).add(related_obj)
+
         return obj.pk
 
 
@@ -109,8 +155,6 @@ class Seeder(object):
         :param faker: Generator
         """
         self.faker = faker
-        self.entities = {}
-        self.quantities = {}
         self.orders = []
 
     def add_entity(self, model, number, customFieldFormatters=None):
@@ -133,12 +177,13 @@ class Seeder(object):
         if customFieldFormatters:
             model.field_formatters.update(customFieldFormatters)
         
-        klass = model.model
-        self.entities[klass] = model
-        self.quantities[klass] = number
-        self.orders.append(klass)
+        self.orders.append({
+            'klass': model.model,
+            'number': number,
+            'model': model,
+        })
 
-    def execute(self, using=None):
+    def execute(self, using=None, inserted_entities={}):
         """
         Populate the database using all the Entity classes previously added.
 
@@ -148,13 +193,14 @@ class Seeder(object):
         if not using:
             using = self.get_connection()
 
-        inserted_entities = {}
-        for klass in self.orders:
-            number = self.quantities[klass]
+        for order in self.orders:
+            klass = order['klass']
+            number = order['number']
+
             if klass not in inserted_entities:
                 inserted_entities[klass] = []
             for i in range(0, number):
-                entity = self.entities[klass].execute(using, inserted_entities)
+                entity = order['model'].execute(using, inserted_entities)
                 inserted_entities[klass].append(entity)
 
         return inserted_entities
@@ -165,7 +211,7 @@ class Seeder(object):
         :rtype: Connection
         """
 
-        klass = self.entities.keys()
+        klass = [order['klass'] for order in self.orders]
         if not klass:
             message = 'No classed found. Did you add entities to the Seeder?'
             raise SeederException(message)

@@ -106,4 +106,5 @@ class FieldTypeGuesser(object):
             return lambda x: _timezone_format(faker.date_time())
         if isinstance(field, DateField): return lambda x: faker.date()
         if isinstance(field, TimeField): return lambda x: faker.time()
+        if hasattr(field, '_default_hint'): return lambda x: field._default_hint[1]
         raise AttributeError(field)
